@@ -940,9 +940,9 @@ Rules:
       setResults(parsed);
       setScreen('results');
     } catch (err) {
-      console.error(err);
-      setError('Something went wrong. Please try again.');
-      setScreen('jobad');
+    console.error(err);
+    setError('Error: ' + err.message);
+    setScreen('jobad');
     }
   };
 
