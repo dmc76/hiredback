@@ -3,6 +3,7 @@
 
 [functions."analyse"]
   timeout = 30
+  node_bundler = "esbuild"
 
 [[redirects]]
   from = "/*"
