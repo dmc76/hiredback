@@ -2,8 +2,7 @@
   functions = "netlify/functions"
 
 [functions."analyse"]
-  timeout = 30
-  node_bundler = "esbuild"
+  timeout = 60
 
 [[redirects]]
   from = "/*"
