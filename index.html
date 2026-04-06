@@ -452,7 +452,7 @@ Rules: be honest and specific. 4-8 diagnostic points. UK English. Warm but direc
     stopMsgs();
     go('jobad');
     const e = document.getElementById('api-err');
-    e.textContent = '⚠ Something went wrong — please try again.';
+    e.textContent = '⚠ Error: ' + err.message;
     e.style.display = 'block';
   }
 }
