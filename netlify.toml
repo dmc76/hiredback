@@ -1,0 +1,19 @@
+[build]
+  functions = "netlify/functions"
+  edge_functions = "netlify/edge-functions"
+
+[functions."analyse"]
+  timeout = 60
+
+[[edge_functions]]
+  path = "/api/analyse"
+  function = "analyse"
+
+[[edge_functions]]
+  path = "/api/verify-licence"
+  function = "verify-licence"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
