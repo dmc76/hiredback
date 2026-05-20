@@ -743,16 +743,16 @@ Diagnostic rules:
     const res = await fetch('/api/analyse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 4000, system, messages })
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 8000, system, messages })
     });
 
-    if (!res.ok) throw new Error('API ' + res.status);
+    if (!res.ok) { const errText = await res.text().catch(() => ""); throw new Error("API " + res.status + (errText ? ": " + errText.slice(0, 200) : "")); }
     const data = await res.json();
     const text = data.result || data.content?.map(b => b.text || '').join('') || '';
     const clean = text.replace(/```json|```/g, '').trim();
     const start = clean.indexOf('{');
     const end = clean.lastIndexOf('}');
-    if (start === -1 || end === -1) throw new Error('No JSON found in response');
+    if (start === -1 || end === -1) { console.error("HiredBack: No JSON in response. Text snippet:", text.slice(0, 500)); throw new Error("No JSON found in response"); }
     const jsonStr = clean.slice(start, end + 1);
     resultsData = JSON.parse(jsonStr);
 
