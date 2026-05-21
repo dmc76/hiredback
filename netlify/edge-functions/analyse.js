@@ -40,144 +40,145 @@ export default async (request, context) => {
       });
     }
 
-    const reader = upstream.body.getReader();
-    const decoder = new TextDecoder();
-    let fullText = '';
-    let buffer = '';
+    // ── Streaming response back to client ─────────────────────
+    // Write a byte immediately so Netlify doesn't time out the connection,
+    // then write the final JSON result once the Anthropic stream is complete.
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
+    const encoder = new TextEncoder();
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data: ')) continue;
-        const data = trimmed.slice(6).trim();
-        if (data === '[DONE]') continue;
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-            fullText += parsed.delta.text;
+    // Write a leading space immediately — keeps the connection alive
+    writer.write(encoder.encode(' '));
+
+    // Process Anthropic stream in background
+    (async () => {
+      try {
+        const reader = upstream.body.getReader();
+        const decoder = new TextDecoder();
+        let fullText = '';
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data: ')) continue;
+            const data = trimmed.slice(6).trim();
+            if (data === '[DONE]') continue;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+                fullText += parsed.delta.text;
+              }
+            } catch (e) {}
           }
-        } catch (e) {}
-      }
-    }
-
-    // Process remaining buffer
-    if (buffer.trim().startsWith('data: ')) {
-      const data = buffer.trim().slice(6).trim();
-      try {
-        const parsed = JSON.parse(data);
-        if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-          fullText += parsed.delta.text;
-        }
-      } catch (e) {}
-    }
-
-    // Find JSON boundaries - handle both objects {} and arrays []
-    let clean = fullText.replace(/```json|```/g, '').trim();
-    const objStart = clean.indexOf('{');
-    const arrStart = clean.indexOf('[');
-    const isArray = arrStart !== -1 && (objStart === -1 || arrStart < objStart);
-    const start = isArray ? arrStart : objStart;
-    const end = isArray ? clean.lastIndexOf(']') : clean.lastIndexOf('}');
-    
-    if (start === -1 || end === -1) {
-      return new Response(JSON.stringify({ error: 'No JSON found in response' }), {
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      });
-    }
-    
-    clean = clean.slice(start, end + 1);
-
-    // ── Robust JSON sanitisation ──────────────────────────────
-    // Try parsing as-is first
-    let parsed;
-    try {
-      parsed = JSON.parse(clean);
-    } catch(e) {
-      // If array response fails just return empty array
-      if (isArray) {
-        return new Response(JSON.stringify({ result: '[]' }), {
-          status: 200,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      }
-      // If that fails, attempt to repair common JSON issues
-      try {
-        // Extract each field individually using regex to avoid cascading failures
-        const atsBeforeMatch = clean.match(/"ats_score_before"\s*:\s*(\d+)/);
-        const atsAfterMatch = clean.match(/"ats_score_after"\s*:\s*(\d+)/);
-        
-        // Extract diagnostic array
-        const diagMatch = clean.match(/"diagnostic"\s*:\s*(\[[\s\S]*?\])\s*,\s*"rewritten_cv"/);
-        
-        // Extract rewritten CV - everything between "rewritten_cv": " and the final "
-        const cvMatch = clean.match(/"rewritten_cv"\s*:\s*"([\s\S]*?)"\s*\}?\s*$/);
-
-        if (!atsBeforeMatch || !atsAfterMatch || !cvMatch) {
-          return new Response(JSON.stringify({ error: 'Could not parse response. Please try again.' }), {
-            status: 500,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
         }
 
-        // Sanitise CV text — escape any unescaped quotes and control characters
-        let cvText = cvMatch[1]
-          .replace(/\\/g, '\\\\')
-          .replace(/"/g, '\\"')
-          .replace(/\n/g, '\\n')
-          .replace(/\r/g, '\\r')
-          .replace(/\t/g, '\\t')
-          .replace(/[\x00-\x1F\x7F]/g, '');
-
-        // Parse diagnostic safely
-        let diagnostic = [];
-        if (diagMatch) {
+        // Process remaining buffer
+        if (buffer.trim().startsWith('data: ')) {
+          const data = buffer.trim().slice(6).trim();
           try {
-            diagnostic = JSON.parse(diagMatch[1]);
-          } catch(de) {
-            // If diagnostic fails just use empty array
-            diagnostic = [];
+            const parsed = JSON.parse(data);
+            if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+              fullText += parsed.delta.text;
+            }
+          } catch (e) {}
+        }
+
+        // Find JSON boundaries
+        let clean = fullText.replace(/```json|```/g, '').trim();
+        const objStart = clean.indexOf('{');
+        const arrStart = clean.indexOf('[');
+        const isArray = arrStart !== -1 && (objStart === -1 || arrStart < objStart);
+        const start = isArray ? arrStart : objStart;
+        const end = isArray ? clean.lastIndexOf(']') : clean.lastIndexOf('}');
+
+        if (start === -1 || end === -1) {
+          writer.write(encoder.encode(JSON.stringify({ error: 'No JSON found in response' })));
+          writer.close();
+          return;
+        }
+
+        clean = clean.slice(start, end + 1);
+
+        // Robust JSON sanitisation
+        let parsed;
+        try {
+          parsed = JSON.parse(clean);
+        } catch(e) {
+          if (isArray) {
+            writer.write(encoder.encode(JSON.stringify({ result: '[]' })));
+            writer.close();
+            return;
+          }
+          try {
+            const atsBeforeMatch = clean.match(/"ats_score_before"\s*:\s*(\d+)/);
+            const atsAfterMatch = clean.match(/"ats_score_after"\s*:\s*(\d+)/);
+            const diagMatch = clean.match(/"diagnostic"\s*:\s*(\[[\s\S]*?\])\s*,\s*"rewritten_cv"/);
+            const cvMatch = clean.match(/"rewritten_cv"\s*:\s*"([\s\S]*?)"\s*\}?\s*$/);
+
+            if (!atsBeforeMatch || !atsAfterMatch || !cvMatch) {
+              writer.write(encoder.encode(JSON.stringify({ error: 'Could not parse response. Please try again.' })));
+              writer.close();
+              return;
+            }
+
+            let cvText = cvMatch[1]
+              .replace(/\\/g, '\\\\')
+              .replace(/"/g, '\\"')
+              .replace(/\n/g, '\\n')
+              .replace(/\r/g, '\\r')
+              .replace(/\t/g, '\\t')
+              .replace(/[\x00-\x1F\x7F]/g, '');
+
+            let diagnostic = [];
+            if (diagMatch) {
+              try { diagnostic = JSON.parse(diagMatch[1]); } catch(de) { diagnostic = []; }
+            }
+
+            parsed = {
+              ats_score_before: parseInt(atsBeforeMatch[1]),
+              ats_score_after: parseInt(atsAfterMatch[1]),
+              diagnostic,
+              rewritten_cv: cvText
+                .replace(/\\n/g, '\n')
+                .replace(/\\t/g, '\t')
+                .replace(/\\"/g, '"')
+                .replace(/\\\\/g, '\\')
+            };
+          } catch(repairError) {
+            writer.write(encoder.encode(JSON.stringify({ error: 'Response could not be processed. Please try again.' })));
+            writer.close();
+            return;
           }
         }
 
-        // Rebuild clean JSON object
-        parsed = {
-          ats_score_before: parseInt(atsBeforeMatch[1]),
-          ats_score_after: parseInt(atsAfterMatch[1]),
-          diagnostic,
-          rewritten_cv: cvText
-            .replace(/\\n/g, '\n')
-            .replace(/\\t/g, '\t')
-            .replace(/\\"/g, '"')
-            .replace(/\\\\/g, '\\')
-        };
+        if (!isArray && (!parsed.rewritten_cv || !Array.isArray(parsed.diagnostic))) {
+          writer.write(encoder.encode(JSON.stringify({ error: 'Incomplete response received. Please try again.' })));
+          writer.close();
+          return;
+        }
 
-      } catch(repairError) {
-        return new Response(JSON.stringify({ error: 'Response could not be processed. Please try again.' }), {
-          status: 500,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
+        writer.write(encoder.encode(JSON.stringify({ result: JSON.stringify(parsed) })));
+        writer.close();
+
+      } catch(err) {
+        try {
+          writer.write(encoder.encode(JSON.stringify({ error: err.message })));
+          writer.close();
+        } catch(e) {}
       }
-    }
+    })();
 
-    // Final validation — only validate object responses (not arrays)
-    if (!isArray && (!parsed.rewritten_cv || !Array.isArray(parsed.diagnostic))) {
-      return new Response(JSON.stringify({ error: 'Incomplete response received. Please try again.' }), {
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      });
-    }
-
-    return new Response(JSON.stringify({ result: JSON.stringify(parsed) }), {
+    return new Response(readable, {
       status: 200,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      headers: { ...corsHeaders, 'Content-Type': 'text/plain' }
     });
 
   } catch (err) {
