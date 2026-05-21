@@ -579,7 +579,7 @@ async function runAnalysis() {
     let questions = [];
     try {
       if (gapRes.ok) {
-        const gapData = await gapRes.json();
+        const gapData = JSON.parse((await gapRes.text()).trim());
         const gapText = gapData.result || '';
         // result might be a stringified array or direct array
         let parsed;
@@ -747,7 +747,7 @@ Diagnostic rules:
     });
 
     if (!res.ok) { const errText = await res.text().catch(() => ""); throw new Error("API " + res.status + (errText ? ": " + errText.slice(0, 200) : "")); }
-    const data = await res.json();
+    const data = JSON.parse((await res.text()).trim());
     const text = data.result || data.content?.map(b => b.text || '').join('') || '';
     const clean = text.replace(/```json|```/g, '').trim();
     const start = clean.indexOf('{');
