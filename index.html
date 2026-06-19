@@ -573,7 +573,7 @@ async function runAnalysis() {
     const gapRes = await fetch('/api/analyse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 1000, system: gapSystem, messages: gapMessages })
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1000, system: gapSystem, messages: gapMessages })
     });
 
     let questions = [];
@@ -743,7 +743,7 @@ Diagnostic rules:
     const res = await fetch('/api/analyse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 8000, system, messages })
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 8000, system, messages })
     });
 
     if (!res.ok) { const errText = await res.text().catch(() => ""); throw new Error("API " + res.status + (errText ? ": " + errText.slice(0, 200) : "")); }
