@@ -553,13 +553,20 @@ async function runAnalysis() {
   jobAdData = document.getElementById('job-ad').value;
   document.getElementById('api-err').style.display = 'none';
   go('processing'); startMsgs(MSGS_ANALYSE);
-
   try {
     cvData = await extractCV(cvFile);
-
     // ── Step 1: Gap analysis — identify missing skills and generate questions ──
-    const gapSystem = `You are an expert UK CV consultant. Analyse the CV against the job advertisement and identify up to 5 skills, qualifications, or experiences mentioned in the job ad that are NOT clearly evidenced in the CV. For each gap, generate a single targeted question to ask the candidate. Only ask about things that could genuinely improve their chances if they do have relevant experience. Do not ask about qualifications they clearly don't have (e.g. don't ask if they have a degree if there's no education history suggesting it). Respond ONLY with a valid JSON array — no preamble, no markdown fences, just raw JSON. Format: [{"gap": "short label", "question": "friendly question to ask the candidate"}]. If there are no meaningful gaps to ask about, return an empty array: []`;
+    const gapSystem = `You are an expert UK CV consultant. Analyse the CV against the job advertisement and identify genuine gaps: skills, qualifications, or experiences mentioned in the job ad that are NOT clearly evidenced in the CV, but that the candidate plausibly could have experience with even if it isn't written down.
 
+A "meaningful gap" means there is a realistic chance the candidate has relevant experience that simply isn't documented in the CV. Do NOT count something as a gap if:
+- The CV's overall background is so different from the role that the missing item is clearly a hard requirement they cannot plausibly hold (e.g. a professional qualification, licence, or specific certification with no related background at all)
+- It is a generic soft skill with no specific evidence needed (e.g. "good communicator")
+
+You must identify gaps independently for EVERY job advert, regardless of how strong or weak the overall match is. A weak match is not a reason to return fewer gaps — if anything, a weak match usually means there are MORE things worth asking about, not fewer. Only return an empty array if the CV already evidences every relevant requirement in the job ad, which will be rare.
+
+Identify up to 5 gaps. For each, generate a single targeted, specific question to ask the candidate — phrase it so a "yes, I have done X" or "no" answer is easy to give.
+
+Respond ONLY with a valid JSON array — no preamble, no markdown fences, no explanation, just the raw array. Format: [{"gap": "short label", "question": "friendly question to ask the candidate"}]`;
     let gapMessages;
     if (cvData.type === 'pdf') {
       gapMessages = [{ role: 'user', content: [
@@ -570,42 +577,69 @@ async function runAnalysis() {
       gapMessages = [{ role: 'user', content: 'CV:\n\n' + cvData.data + '\n\n---\n\nJob advertisement:\n\n' + jobAdData + '\n\nIdentify gaps and return your JSON array of questions.' }];
     }
 
-    const gapRes = await fetch('/api/analyse', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1000, system: gapSystem, messages: gapMessages })
-    });
+    // ── Helper: one attempt at the gap-analysis call + parse ──
+    async function attemptGapAnalysis() {
+      const gapRes = await fetch('/api/analyse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1000, system: gapSystem, messages: gapMessages })
+      });
 
-    let questions = [];
-    try {
-      if (gapRes.ok) {
-        const gapData = JSON.parse((await gapRes.text()).trim());
-        const gapText = gapData.result || '';
-        // result might be a stringified array or direct array
-        let parsed;
-        if (typeof gapText === 'string') {
-          const gapClean = gapText.replace(/```json|```/g, '').trim();
-          const gapStart = gapClean.indexOf('[');
-          const gapEnd = gapClean.lastIndexOf(']');
-          if (gapStart !== -1 && gapEnd !== -1) {
-            parsed = JSON.parse(gapClean.slice(gapStart, gapEnd + 1));
-          }
-        } else if (Array.isArray(gapText)) {
-          parsed = gapText;
-        }
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          questions = parsed.slice(0, 5); // Max 5 questions
-        }
+      if (!gapRes.ok) {
+        const errText = await gapRes.text().catch(() => '');
+        throw new Error('Gap analysis API ' + gapRes.status + (errText ? ': ' + errText.slice(0, 200) : ''));
       }
-    } catch(e) {
-      console.log('Gap analysis parse failed, skipping Q&A:', e);
-      questions = [];
+
+      const gapData = JSON.parse((await gapRes.text()).trim());
+      const gapText = gapData.result || '';
+
+      let parsed;
+      if (typeof gapText === 'string') {
+        const gapClean = gapText.replace(/```json|```/g, '').trim();
+        const gapStart = gapClean.indexOf('[');
+        const gapEnd = gapClean.lastIndexOf(']');
+        if (gapStart === -1 || gapEnd === -1) {
+          throw new Error('No JSON array found in gap analysis response');
+        }
+        parsed = JSON.parse(gapClean.slice(gapStart, gapEnd + 1));
+      } else if (Array.isArray(gapText)) {
+        parsed = gapText;
+      } else {
+        throw new Error('Unexpected gap analysis response shape');
+      }
+
+      if (!Array.isArray(parsed)) {
+        throw new Error('Gap analysis did not return an array');
+      }
+
+      return parsed;
+    }
+
+    // ── Try once, retry once on failure, only then fall back to empty ──
+    let questions = [];
+    let gapError = null;
+    try {
+      const parsed = await attemptGapAnalysis();
+      questions = parsed.slice(0, 5);
+    } catch (firstErr) {
+      console.warn('Gap analysis attempt 1 failed, retrying:', firstErr);
+      try {
+        const parsed = await attemptGapAnalysis();
+        questions = parsed.slice(0, 5);
+      } catch (secondErr) {
+        console.error('Gap analysis attempt 2 also failed, treating as no gaps:', secondErr);
+        gapError = secondErr;
+        questions = [];
+      }
     }
 
     stopMsgs();
 
-    // If no gaps or empty array — skip Q&A and go straight to rewrite
+    // If genuinely no gaps (or both attempts failed) — skip Q&A and go straight to rewrite
     if (!questions || questions.length === 0) {
+      if (gapError) {
+        console.error('Proceeding to rewrite without Q&A because gap analysis failed twice:', gapError);
+      }
       await runRewrite([]);
       return;
     }
@@ -613,17 +647,15 @@ async function runAnalysis() {
     // Show Q&A screen
     renderQA(questions);
     go('qa');
-
   } catch(err) {
     console.error(err);
     stopMsgs();
     go('jobad');
     const e = document.getElementById('api-err');
-    e.textContent = '⚠ Something went wrong — please try again.';
+    e.textContent = '⚠ Something went wrong — please try again. (' + (err && err.message ? err.message : 'unknown error') + ')';
     e.style.display = 'block';
   }
 }
-
 // ── Render Q&A questions ──────────────────────────────────────
 function renderQA(questions) {
   const container = document.getElementById('qa-questions');
